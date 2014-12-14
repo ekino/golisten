@@ -30,6 +30,18 @@ var (
 	}
 )
 
+func debug(message string) {
+	if (configuration.Verbose == false) {
+		return
+	}
+
+	log.Print(message, "\n")
+}
+
+func info(message string) {
+	log.Print(message, "\n")
+}
+
 type Operation struct {
 	Path      string
 	Type      string
@@ -80,20 +92,20 @@ func (o Operation) GemName() string {
 }
 
 type Configuration struct {
-	Path          string
-	Server        string
-	Verbose       bool
-	Command       string
-	Exclude       string
-	Include       string
-	MaxConnection int
-	ServerFormat  string
+	Path                string
+	Server              string
+	Verbose             bool
+	Command             string
+	Exclude             string
+	Include             string
+	ServerMaxConnection int
+	ServerFormat        string
 }
 
 func NewServer(conf *Configuration) *Server {
 	return &Server{
 		listeners: list.New(),
-		maxConnection: conf.MaxConnection,
+		maxConnection: conf.ServerMaxConnection,
 	}
 }
 
@@ -153,23 +165,19 @@ func AddFolder(watcher *fsnotify.Watcher, conf *Configuration) error {
 	cpt := 0
 
 	err = filepath.Walk(path, func(path string, f os.FileInfo, err error) error {
-
 		if err != nil {
 			log.Printf("Folder does not exist: ", err)
 			panic(err)
 		}
 
 		if f.IsDir() {
-
 			if include.Match([]byte(path)) == true && exclude.Match([]byte(path)) == false {
-
 				log.Printf("Add directory: %s\n", path)
 
 				watcher.Add(path)
 
 				cpt += 1
 			}
-
 		}
 
 		return nil
@@ -214,15 +222,14 @@ func StartServer(server *Server, conf *Configuration) {
 
 func init() {
 	flag.StringVar(&configuration.Path, "path", ".", "The path to watch")
-	flag.BoolVar(&configuration.Verbose, "verbose", true, "Display verbose information")
+	flag.BoolVar(&configuration.Verbose, "verbose", false, "Display verbose information")
 	flag.StringVar(&configuration.Server, "server", "", "Open a TCP server with local modification")
 	flag.StringVar(&configuration.Command, "command", "", "The command to start, use {file} as placeholder for the file")
 	flag.StringVar(&configuration.Exclude, "exclude", "(\\.svn|\\.git|node_modules|bower_components|.idea)", "Folder pattern to ignore")
 	flag.StringVar(&configuration.Include, "include", "*", "Folder pattern to include (all by default)")
-	flag.IntVar(&configuration.MaxConnection, "max-connection", 8, "The number of maximun connection, default=8")
+	flag.IntVar(&configuration.ServerMaxConnection, "server-max-connection", 8, "The number of maximun connection, default=8")
 	flag.StringVar(&configuration.ServerFormat, "server-format", FORMAT_GO_JSON, fmt.Sprintf("Output format, default to: %s (also: %s compatible with gem listen)", FORMAT_GO_JSON, FORMAT_GEM ))
 }
-
 
 func main() {
 
@@ -270,46 +277,48 @@ func main() {
 
 					var raw []byte
 					if configuration.ServerFormat == FORMAT_GEM {
-						raw = []byte(fmt.Sprintf("d[\"%s\",\"%s\",\"%s\",\"%s\",{}])", op.Type, op.GemName(), op.Dir, op.Filename ))
+						raw = []byte(fmt.Sprintf("d[\"%s\",\"%s\",\"%s\",\"%s\",{}]", op.Type, op.GemName(), op.Dir, op.Filename ))
 					} else {
 						raw, _ = json.Marshal(op)
 					}
 
+					debug(fmt.Sprintf("Raw message: %s", raw))
 					server.SendMessage(raw)
 				}
 
 				if configuration.Command != "" {
 					if running {
-						log.Printf("SKIPPING: Command already running\n", configuration.Command)
+						debug(fmt.Sprintf("SKIPPING: Command already running", configuration.Command))
 					} else {
 						go func() {
 							running = true
-							log.Printf("Running command: %s\n", configuration.Command)
+
+							debug(fmt.Sprintf("Running command: %s", configuration.Command))
 
 							output, err := exec.Command("sh", "-c", configuration.Command).CombinedOutput()
 							if err != nil {
-								log.Printf("Fail to run the command: %s\n", err)
+								info(fmt.Sprintf("Fail to run the command: %s", err))
 							}
 
-							log.Printf("Output command\n%s\n", output)
+							info(fmt.Sprintf("Output command\n%s", output))
 
 							running = false
 						}()
 					}
 				}
 
-				log.Printf("Operation: %+v \n", op)
+				info(fmt.Sprintf("Operation: %s => %s", op.Name(), op.Filename))
 			case err := <-watcher.Errors:
-				log.Println("error:", err)
+				info(fmt.Sprint("error: %s", err))
 			}
 		}
 	}()
 
-	log.Printf("Scanning folders: %s\n", configuration)
+	info(fmt.Sprintf("Scanning folders: %s\n", configuration))
 
 	AddFolder(watcher, configuration)
 
-	log.Printf("End scanning.")
+	info(fmt.Sprintf("End scanning."))
 
 	if err != nil {
 		log.Fatal(err)
