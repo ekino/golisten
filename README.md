@@ -27,7 +27,7 @@ gulp integration
 ----------------
 
  - Make sure you have ``gulp-util`` installed
- - Install ``gulp-watch-network`` version >=0.1.7
+ - Install ``watch-network`` module version >=0.1.7
  - Add the ``watch-network`` task into your ``gulpfile.js``
  - Run the command ``gulp watch-network`` (the golisten server must run on the host machine)
 
@@ -67,7 +67,7 @@ It is possible to start the watcher command and the remote command in one comman
      -parallel-command="vagrant ssh -c \"cd /vagrant/go/src/github.com/rande/gonodeexplorer && gulp watch-network\"" \
      -verbose
 
-Let's explain the option:
+Let's explain the options:
 
   - ``path``: specify the path to listen
   - ``server``: start a TCP server for remote process to listen to local change
@@ -86,5 +86,5 @@ And use this configuration file:
 
     ./golisten -c config.toml
 
-    
+
 
