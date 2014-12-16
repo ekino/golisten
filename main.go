@@ -16,6 +16,9 @@ import (
 	"os/exec"
 	"regexp"
 	"fmt"
+	"io"
+	"time"
+	"runtime"
 )
 
 const (
@@ -28,6 +31,8 @@ var (
 		Path: ".",
 		Verbose: true,
 	}
+	exclude *regexp.Regexp
+	include *regexp.Regexp
 )
 
 func debug(message string) {
@@ -100,6 +105,7 @@ type Configuration struct {
 	Include             string
 	ServerMaxConnection int
 	ServerFormat        string
+	ParallelCommand     string
 }
 
 func NewServer(conf *Configuration) *Server {
@@ -120,7 +126,7 @@ func (s *Server) SendMessage(message []byte) {
 		_, err := conn.Write(message)
 
 		if err != nil {
-			log.Printf("Error write: %+v\n", err)
+			info(fmt.Sprintf("Error writing to: %+v, removing connection from the stacks", err))
 			s.listeners.Remove(e)
 			conn.Close()
 
@@ -150,30 +156,18 @@ func (s *Server) AddListener(l net.Conn) {
 func AddFolder(watcher *fsnotify.Watcher, conf *Configuration) error {
 	path, _ := filepath.Abs(conf.Path)
 
-	exclude, err := regexp.Compile(fmt.Sprintf("^(.*)%s(.*)$", conf.Exclude))
-
-	if err != nil {
-		panic(err)
-	}
-
-	include, err := regexp.Compile(fmt.Sprintf("^(.*)%s(.*)$", conf.Include))
-
-	if err != nil {
-		panic(err)
-	}
-
 	cpt := 0
 
-	err = filepath.Walk(path, func(path string, f os.FileInfo, err error) error {
+	err := filepath.Walk(path, func(path string, f os.FileInfo, err error) error {
 		if err != nil {
-			log.Printf("Folder does not exist: ", err)
+			debug(fmt.Sprintf("Folder does not exist: ", err))
 			panic(err)
 		}
 
 		if f.IsDir() {
 			if include.Match([]byte(path)) == true && exclude.Match([]byte(path)) == false {
-				log.Printf("Add directory: %s\n", path)
 
+				debug(fmt.Sprintf("Add folder: %s", path))
 				watcher.Add(path)
 
 				cpt += 1
@@ -183,14 +177,14 @@ func AddFolder(watcher *fsnotify.Watcher, conf *Configuration) error {
 		return nil
 	})
 
-	log.Printf("%d folders added\n", cpt)
+	info(fmt.Sprintf("%d folders added", cpt))
 
 	return err
 }
 
 func StartServer(server *Server, conf *Configuration) {
 	if conf.Server == "" {
-		log.Println("Server disabled")
+		info("Server disabled")
 
 		return
 	}
@@ -206,7 +200,7 @@ func StartServer(server *Server, conf *Configuration) {
 	// Close the listener when the application closes.
 	defer l.Close()
 
-	log.Println("Listening on " + conf.Server)
+	info(fmt.Sprintf("Listening on %s", conf.Server))
 
 	for {
 		// Listen for an incoming connection.
@@ -220,29 +214,129 @@ func StartServer(server *Server, conf *Configuration) {
 	}
 }
 
+func GetCommand(command string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/C %s", configuration.ParallelCommand)
+	}
+
+	return exec.Command("sh", "-c", configuration.ParallelCommand)
+}
+
 func init() {
 	flag.StringVar(&configuration.Path, "path", ".", "The path to watch")
 	flag.BoolVar(&configuration.Verbose, "verbose", false, "Display verbose information")
 	flag.StringVar(&configuration.Server, "server", "", "Open a TCP server with local modification")
 	flag.StringVar(&configuration.Command, "command", "", "The command to start, use {file} as placeholder for the file")
-	flag.StringVar(&configuration.Exclude, "exclude", "(\\.svn|\\.git|node_modules|bower_components|.idea)", "Folder pattern to ignore")
+	flag.StringVar(&configuration.Exclude, "exclude", "((.*)/\\.git|\\.svn|node_modules|bower_components|/dist)", "Folder pattern to ignore")
 	flag.StringVar(&configuration.Include, "include", "*", "Folder pattern to include (all by default)")
 	flag.IntVar(&configuration.ServerMaxConnection, "server-max-connection", 8, "The number of maximun connection, default=8")
 	flag.StringVar(&configuration.ServerFormat, "server-format", FORMAT_GO_JSON, fmt.Sprintf("Output format, default to: %s (also: %s compatible with gem listen)", FORMAT_GO_JSON, FORMAT_GEM ))
+	flag.StringVar(&configuration.ParallelCommand, "parallel-command", "", fmt.Sprintf("Run a command as a child process"))
 }
 
-func main() {
+// configure basic variable and check if the command can run properly
+func configure() {
+	var err error
 
+	// parse command line argument
 	flag.Parse()
 
+	// check if the command can run
 	if configuration.Server == "" && configuration.Command == "" {
 		log.Fatal("You need to set either a -server option or a -command option")
 	}
 
+	// parse Exclude and Include parameter
+	exclude, err = regexp.Compile(fmt.Sprintf("^(.*)%s(.*)$", configuration.Exclude))
+
+	if err != nil {
+		panic(err)
+	}
+
+	include, err = regexp.Compile(fmt.Sprintf("^(.*)%s(.*)$", configuration.Include))
+
+	if err != nil {
+		panic(err)
+	}
+
+	debug("")
+	debug(fmt.Sprintf("> Configuration"))
+	debug(fmt.Sprintf(">> Path: %s ", configuration.Path))
+	debug(fmt.Sprintf(">> Path: %b ", configuration.Verbose))
+	debug(fmt.Sprintf(">> Server: %s ", configuration.Server))
+	debug(fmt.Sprintf(">> Command: %s ", configuration.Command))
+	debug(fmt.Sprintf(">> Exclude: %s ", configuration.Exclude))
+	debug(fmt.Sprintf(">> Include: %s ", configuration.Include))
+	debug(fmt.Sprintf(">> ServerMaxConnection: %s ", configuration.ServerMaxConnection))
+	debug(fmt.Sprintf(">> ServerFormat: %s ", configuration.ServerFormat))
+	debug(fmt.Sprintf(">> ParallelCommand: %s ", configuration.ParallelCommand))
+	debug("")
+	debug("")
+}
+
+func getWatcher() *fsnotify.Watcher {
+	// start the watcher
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	debug(fmt.Sprintf("Scanning folders",))
+
+	AddFolder(watcher, configuration)
+
+	debug(fmt.Sprintf("End scanning."))
+
+	return watcher
+}
+
+func startParallelCommand() {
+//	var err error
+
+	if configuration.ParallelCommand == "" {
+		return;
+	}
+
+	for {
+		debug(fmt.Sprintf("Running command: %s", configuration.ParallelCommand))
+
+		c := GetCommand(configuration.ParallelCommand)
+
+		errReader, err := c.StderrPipe()
+		outReader, err := c.StdoutPipe()
+
+		err = c.Start()
+
+		if err != nil {
+			panic(err)
+		}
+
+		go io.Copy(os.Stdout, errReader)
+		go io.Copy(os.Stdout, outReader)
+
+		c.Wait()
+
+		debug(fmt.Sprintf("Parallel command exited, start a new one in 5s"))
+
+		time.Sleep(5 * time.Second)
+	}
+
+}
+
+func main() {
+	var err error
+
+
+	info("golisten is a development tools and not suitable for production usage")
+	info("   more information can be found at https://github.com/ekino/golisten")
+	info("                                                Thomas Rabaix @ Ekino")
+	info("")
+
+	configure()
+
+	// start the watcher
+	watcher := getWatcher()
+
 	defer watcher.Close()
 
 	done := make(chan bool)
@@ -271,6 +365,22 @@ func main() {
 
 				op.Operation = op.Name()
 
+				debug(fmt.Sprintf("Operation: %s", op.Name()))
+
+				if include.Match([]byte(path)) == false  {
+					debug(fmt.Sprintf("Skipping: does not match include path: %s", op.Path))
+
+					continue
+				}
+
+				if exclude.Match([]byte(path)) == true {
+					debug(fmt.Sprintf("Skipping: does match exclude path: %s", op.Path))
+
+					continue
+				}
+
+				debug(fmt.Sprintf("Event path: %s", op.Path))
+
 				if configuration.Server != "" {
 					// format compatible with gem listen
 					// d["file","added","/Users/rande/Projects/go/gonode/src/github.com/rande/gonodeexplorer","test",{}]
@@ -295,7 +405,8 @@ func main() {
 
 							debug(fmt.Sprintf("Running command: %s", configuration.Command))
 
-							output, err := exec.Command("sh", "-c", configuration.Command).CombinedOutput()
+							c := GetCommand(configuration.Command)
+							output, err := c.CombinedOutput()
 							if err != nil {
 								info(fmt.Sprintf("Fail to run the command: %s", err))
 							}
@@ -314,11 +425,7 @@ func main() {
 		}
 	}()
 
-	info(fmt.Sprintf("Scanning folders: %s\n", configuration))
-
-	AddFolder(watcher, configuration)
-
-	info(fmt.Sprintf("End scanning."))
+	go startParallelCommand()
 
 	if err != nil {
 		log.Fatal(err)
