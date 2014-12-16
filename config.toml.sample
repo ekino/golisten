@@ -1,0 +1,4 @@
+Path = "/Users/rande/Projects/go/src/github.com/rande/gonodeexplorer"
+Server = "192.168.30.1:4000"
+ServerFormat = "gem-listen"
+ParallelCommand = "vagrant ssh -c \"cd /vagrant/go/src/github.com/rande/gonodeexplorer && gulp watch-network\""

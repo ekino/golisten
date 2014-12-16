@@ -6,6 +6,7 @@ package main
 
 import (
 	"gopkg.in/fsnotify.v1"
+	"github.com/BurntSushi/toml"
 	"log"
 	"os"
 	"path/filepath"
@@ -27,10 +28,7 @@ const (
 )
 
 var (
-	configuration = &Configuration{
-		Path: ".",
-		Verbose: true,
-	}
+	configuration = &Configuration{}
 	exclude *regexp.Regexp
 	include *regexp.Regexp
 )
@@ -99,13 +97,15 @@ func (o Operation) GemName() string {
 type Configuration struct {
 	Path                string
 	Server              string
-	Verbose             bool
 	Command             string
 	Exclude             string
 	Include             string
-	ServerMaxConnection int
 	ServerFormat        string
 	ParallelCommand     string
+	ServerMaxConnection int
+	Verbose             bool
+	FileConfiguration   string
+	PrintConfiguration  bool
 }
 
 func NewServer(conf *Configuration) *Server {
@@ -158,6 +158,8 @@ func AddFolder(watcher *fsnotify.Watcher, conf *Configuration) error {
 
 	cpt := 0
 
+	info(fmt.Sprintf("Scanning folders",))
+
 	err := filepath.Walk(path, func(path string, f os.FileInfo, err error) error {
 		if err != nil {
 			debug(fmt.Sprintf("Folder does not exist: ", err))
@@ -178,6 +180,7 @@ func AddFolder(watcher *fsnotify.Watcher, conf *Configuration) error {
 	})
 
 	info(fmt.Sprintf("%d folders added", cpt))
+	info(fmt.Sprintf("End scanning."))
 
 	return err
 }
@@ -223,15 +226,33 @@ func GetCommand(command string) *exec.Cmd {
 }
 
 func init() {
-	flag.StringVar(&configuration.Path, "path", ".", "The path to watch")
+	flag.StringVar(&configuration.Path, "path", "", "The path to watch")
 	flag.BoolVar(&configuration.Verbose, "verbose", false, "Display verbose information")
 	flag.StringVar(&configuration.Server, "server", "", "Open a TCP server with local modification")
 	flag.StringVar(&configuration.Command, "command", "", "The command to start, use {file} as placeholder for the file")
-	flag.StringVar(&configuration.Exclude, "exclude", "((.*)/\\.git|\\.svn|node_modules|bower_components|/dist)", "Folder pattern to ignore")
-	flag.StringVar(&configuration.Include, "include", "*", "Folder pattern to include (all by default)")
+	flag.StringVar(&configuration.Exclude, "exclude", "", "Folder pattern to ignore")
+	flag.StringVar(&configuration.Include, "include", "", "Folder pattern to include (all by default)")
 	flag.IntVar(&configuration.ServerMaxConnection, "server-max-connection", 8, "The number of maximun connection, default=8")
-	flag.StringVar(&configuration.ServerFormat, "server-format", FORMAT_GO_JSON, fmt.Sprintf("Output format, default to: %s (also: %s compatible with gem listen)", FORMAT_GO_JSON, FORMAT_GEM ))
+	flag.StringVar(&configuration.ServerFormat, "server-format", "", fmt.Sprintf("Output format, default to: %s (also: %s compatible with gem listen)", FORMAT_GO_JSON, FORMAT_GEM ))
 	flag.StringVar(&configuration.ParallelCommand, "parallel-command", "", fmt.Sprintf("Run a command as a child process"))
+	flag.StringVar(&configuration.FileConfiguration, "c", "", fmt.Sprintf("Configuration file to use"))
+	flag.BoolVar(&configuration.PrintConfiguration, "p", false, fmt.Sprintf("Print the current configuration into stdout"))
+}
+
+func PrintConfiguration(conf *Configuration) {
+	debug("")
+	debug(fmt.Sprintf("> Configuration"))
+	debug(fmt.Sprintf(">> Path: %s ", conf.Path))
+	debug(fmt.Sprintf(">> Verbose: %b ", conf.Verbose))
+	debug(fmt.Sprintf(">> Server: %s ", conf.Server))
+	debug(fmt.Sprintf(">> Command: %s ", conf.Command))
+	debug(fmt.Sprintf(">> Exclude: %s ", conf.Exclude))
+	debug(fmt.Sprintf(">> Include: %s ", conf.Include))
+	debug(fmt.Sprintf(">> ServerMaxConnection: %s ", conf.ServerMaxConnection))
+	debug(fmt.Sprintf(">> ServerFormat: %s ", conf.ServerFormat))
+	debug(fmt.Sprintf(">> ParallelCommand: %s ", conf.ParallelCommand))
+	debug("")
+	debug("")
 }
 
 // configure basic variable and check if the command can run properly
@@ -240,6 +261,79 @@ func configure() {
 
 	// parse command line argument
 	flag.Parse()
+
+	if configuration.FileConfiguration != "" {
+		var fileConf = Configuration{}
+		path, _ := filepath.Abs(configuration.FileConfiguration)
+
+		if _, err := toml.DecodeFile(path, &fileConf); err != nil {
+			info(fmt.Sprintf("Error while reading configuration file, %s", err))
+		}
+
+		if configuration.Command == "" {
+			configuration.Command = fileConf.Command
+		}
+
+		if configuration.Path == "" {
+			configuration.Path = fileConf.Path
+		}
+
+		if configuration.Server == "" {
+			configuration.Server = fileConf.Server
+		}
+
+		if configuration.Exclude == "" {
+			configuration.Exclude = fileConf.Exclude
+		}
+
+		if configuration.Include == "" {
+			configuration.Include = fileConf.Include
+		}
+
+		if configuration.ServerMaxConnection == 0 {
+			configuration.ServerMaxConnection = fileConf.ServerMaxConnection
+		}
+
+		if configuration.ServerFormat == "" {
+			configuration.ServerFormat = fileConf.ServerFormat
+		}
+
+		if configuration.ParallelCommand == "" {
+			configuration.ParallelCommand = fileConf.ParallelCommand
+		}
+	}
+
+	// fix default value
+	if configuration.Exclude == "" {
+		configuration.Exclude = "((.*)/\\.git|\\.svn|node_modules|bower_components|/dist)"
+	}
+
+	if configuration.Include == "" {
+		configuration.Include = "*"
+	}
+
+	if configuration.Path == "" {
+		configuration.Path = "."
+	}
+
+	if configuration.ServerFormat == "" {
+		configuration.ServerFormat = "127.0.0.1:4000"
+	}
+
+
+	if configuration.ServerFormat == "" {
+		configuration.ServerFormat = FORMAT_GO_JSON
+	}
+
+	configuration.Path, _ = filepath.Abs(configuration.Path)
+
+
+	if configuration.PrintConfiguration {
+		encoder := toml.NewEncoder(os.Stdout)
+		encoder.Encode(configuration)
+
+		os.Exit(0)
+	}
 
 	// check if the command can run
 	if configuration.Server == "" && configuration.Command == "" {
@@ -259,19 +353,7 @@ func configure() {
 		panic(err)
 	}
 
-	debug("")
-	debug(fmt.Sprintf("> Configuration"))
-	debug(fmt.Sprintf(">> Path: %s ", configuration.Path))
-	debug(fmt.Sprintf(">> Path: %b ", configuration.Verbose))
-	debug(fmt.Sprintf(">> Server: %s ", configuration.Server))
-	debug(fmt.Sprintf(">> Command: %s ", configuration.Command))
-	debug(fmt.Sprintf(">> Exclude: %s ", configuration.Exclude))
-	debug(fmt.Sprintf(">> Include: %s ", configuration.Include))
-	debug(fmt.Sprintf(">> ServerMaxConnection: %s ", configuration.ServerMaxConnection))
-	debug(fmt.Sprintf(">> ServerFormat: %s ", configuration.ServerFormat))
-	debug(fmt.Sprintf(">> ParallelCommand: %s ", configuration.ParallelCommand))
-	debug("")
-	debug("")
+	PrintConfiguration(configuration)
 }
 
 func getWatcher() *fsnotify.Watcher {
@@ -281,11 +363,7 @@ func getWatcher() *fsnotify.Watcher {
 		log.Fatal(err)
 	}
 
-	debug(fmt.Sprintf("Scanning folders",))
-
 	AddFolder(watcher, configuration)
-
-	debug(fmt.Sprintf("End scanning."))
 
 	return watcher
 }
@@ -298,7 +376,7 @@ func startParallelCommand() {
 	}
 
 	for {
-		debug(fmt.Sprintf("Running command: %s", configuration.ParallelCommand))
+		info(fmt.Sprintf("Running command: %s", configuration.ParallelCommand))
 
 		c := GetCommand(configuration.ParallelCommand)
 
@@ -316,9 +394,9 @@ func startParallelCommand() {
 
 		c.Wait()
 
-		debug(fmt.Sprintf("Parallel command exited, start a new one in 5s"))
+		info(fmt.Sprintf("Parallel command exited, start a new one in 2s"))
 
-		time.Sleep(5 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 
 }
@@ -327,12 +405,14 @@ func main() {
 	var err error
 
 
+	configure()
+
 	info("golisten is a development tools and not suitable for production usage")
 	info("   more information can be found at https://github.com/ekino/golisten")
 	info("                                                Thomas Rabaix @ Ekino")
 	info("")
 
-	configure()
+
 
 	// start the watcher
 	watcher := getWatcher()
