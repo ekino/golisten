@@ -7,7 +7,7 @@ The aim of this project is to solve an issue about file change detections inside
 handled by a Vagrant Box.
 
 If you are using a solution like ``gulp`` or ``grunt``, they both provide a solution to watch files for change and start
-tasks. However, the watch feature don't work well inside a virtual machine:
+tasks. However, the watch feature doesn't work well inside a virtual machine:
  - shared folders are slow, so the change detection can take a while depends on the project size (up to 10s).
  - shared folders does not allow to use native FS features to detect file change, so the polling method consumes a lot
   of resources.
