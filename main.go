@@ -5,36 +5,39 @@
 package main
 
 import (
-	"gopkg.in/fsnotify.v1"
-	"github.com/BurntSushi/toml"
-	"log"
-	"os"
-	"path/filepath"
-	"flag"
-	"net"
+	"bytes"
 	"container/list"
+	"encoding/binary"
 	"encoding/json"
-	"os/exec"
-	"regexp"
+	"flag"
 	"fmt"
 	"io"
-	"time"
+	"log"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"runtime"
+	"time"
+
+	"github.com/BurntSushi/toml"
+	"github.com/rjeczalik/notify"
 )
 
 const (
-	FORMAT_GEM = "gem-listen"
+	FORMAT_GEM     = "gem-listen"
 	FORMAT_GO_JSON = "go-json"
 )
 
 var (
 	configuration = &Configuration{}
-	exclude *regexp.Regexp
-	include *regexp.Regexp
+	exclude       *regexp.Regexp
+	include       *regexp.Regexp
 )
 
 func debug(message string) {
-	if (configuration.Verbose == false) {
+	if configuration.Verbose == false {
 		return
 	}
 
@@ -47,51 +50,76 @@ func info(message string) {
 
 type Operation struct {
 	Path      string
-	Type      string
-	Dir       string
-	Filename  string
-	Op        fsnotify.Op
-	Operation string
+	EventInfo notify.EventInfo
 }
 
 func (o Operation) Name() string {
-	if o.Op&fsnotify.Create == fsnotify.Create {
+	switch o.EventInfo.Event() {
+	case notify.Create:
 		return "CREATE"
-	}
-	if o.Op&fsnotify.Remove == fsnotify.Remove {
+	case notify.Remove:
 		return "REMOVE"
-	}
-	if o.Op&fsnotify.Write == fsnotify.Write {
+	case notify.Rename:
+		return "RENAME"
+	default:
 		return "WRITE"
 	}
-	if o.Op&fsnotify.Rename == fsnotify.Rename {
-		return "RENAME"
-	}
-	if o.Op&fsnotify.Chmod == fsnotify.Chmod {
-		return "CHMOD"
-	}
-
-	return "WRITE"
 }
 
 func (o Operation) GemName() string {
-	if o.Op&fsnotify.Create == fsnotify.Create {
+	switch o.EventInfo.Event() {
+	case notify.Create:
 		return "added"
-	}
-	if o.Op&fsnotify.Remove == fsnotify.Remove {
+	case notify.Remove:
 		return "removed"
-	}
-	if o.Op&fsnotify.Write == fsnotify.Write {
+	case notify.Rename:
+		return "removed"
+	default:
 		return "modified"
 	}
-	if o.Op&fsnotify.Rename == fsnotify.Rename {
-		return "removed"
-	}
-	if o.Op&fsnotify.Chmod == fsnotify.Chmod {
-		return "modified"
+}
+
+type watcher struct {
+	events chan notify.EventInfo
+	ops    chan Operation
+}
+
+func newWatcher(path string, include, exclude *regexp.Regexp) (*watcher, error) {
+	events := make(chan notify.EventInfo, 10)
+	ops := make(chan Operation, 10)
+
+	if err := notify.Watch(path+"/...", events, notify.All); err != nil {
+		return nil, err
 	}
 
-	return "modified"
+	go func() {
+		for ev := range events {
+			if include.MatchString(ev.Path()) == false {
+				debug(fmt.Sprintf("Skipping: does not match include path: %s", ev.Path()))
+				continue
+			}
+
+			if exclude.MatchString(ev.Path()) == true {
+				debug(fmt.Sprintf("Skipping: does match exclude path: %s", ev.Path()))
+				continue
+			}
+
+			ops <- Operation{
+				Path:      ev.Path(),
+				EventInfo: ev,
+			}
+		}
+	}()
+
+	return &watcher{ops: ops, events: events}, nil
+}
+
+func (w *watcher) Watch() chan Operation {
+	return w.ops
+}
+
+func (w *watcher) Close() {
+	notify.Stop(w.events)
 }
 
 type Configuration struct {
@@ -110,7 +138,7 @@ type Configuration struct {
 
 func NewServer(conf *Configuration) *Server {
 	return &Server{
-		listeners: list.New(),
+		listeners:     list.New(),
 		maxConnection: conf.ServerMaxConnection,
 	}
 }
@@ -138,8 +166,7 @@ func (s *Server) SendMessage(message []byte) {
 }
 
 func (s *Server) AddListener(l net.Conn) {
-
-	if s.listeners.Len() + 1 > s.maxConnection {
+	if s.listeners.Len()+1 > s.maxConnection {
 		log.Printf("Drop client connection, too much connections\n")
 
 		l.Write([]byte("Cannot register your client, too much connections\n"))
@@ -151,44 +178,9 @@ func (s *Server) AddListener(l net.Conn) {
 	s.listeners.PushBack(l)
 }
 
-// Add folder recursively in the watcher scope
-// The configuration object is used to get the root path and exclude/include information
-func AddFolder(watcher *fsnotify.Watcher, conf *Configuration) error {
-	path, _ := filepath.Abs(conf.Path)
-
-	cpt := 0
-
-	info(fmt.Sprintf("Scanning folders",))
-
-	err := filepath.Walk(path, func(path string, f os.FileInfo, err error) error {
-		if err != nil {
-			debug(fmt.Sprintf("Folder does not exist: ", err))
-			panic(err)
-		}
-
-		if f.IsDir() {
-			if include.Match([]byte(path)) == true && exclude.Match([]byte(path)) == false {
-
-				debug(fmt.Sprintf("Add folder: %s", path))
-				watcher.Add(path)
-
-				cpt += 1
-			}
-		}
-
-		return nil
-	})
-
-	info(fmt.Sprintf("%d folders added", cpt))
-	info(fmt.Sprintf("End scanning."))
-
-	return err
-}
-
 func StartServer(server *Server, conf *Configuration) {
 	if conf.Server == "" {
 		info("Server disabled")
-
 		return
 	}
 
@@ -233,7 +225,7 @@ func init() {
 	flag.StringVar(&configuration.Exclude, "exclude", "", "Folder pattern to ignore")
 	flag.StringVar(&configuration.Include, "include", "", "Folder pattern to include (all by default)")
 	flag.IntVar(&configuration.ServerMaxConnection, "server-max-connection", 8, "The number of maximun connection, default=8")
-	flag.StringVar(&configuration.ServerFormat, "server-format", "", fmt.Sprintf("Output format, default to: %s (also: %s compatible with gem listen)", FORMAT_GO_JSON, FORMAT_GEM ))
+	flag.StringVar(&configuration.ServerFormat, "server-format", "", fmt.Sprintf("Output format, default to: %s (also: %s compatible with gem listen)", FORMAT_GO_JSON, FORMAT_GEM))
 	flag.StringVar(&configuration.ParallelCommand, "parallel-command", "", fmt.Sprintf("Run a command as a child process"))
 	flag.StringVar(&configuration.FileConfiguration, "c", "", fmt.Sprintf("Configuration file to use"))
 	flag.BoolVar(&configuration.PrintConfiguration, "p", false, fmt.Sprintf("Print the current configuration into stdout"))
@@ -320,13 +312,11 @@ func configure() {
 		configuration.ServerFormat = "127.0.0.1:4000"
 	}
 
-
 	if configuration.ServerFormat == "" {
 		configuration.ServerFormat = FORMAT_GO_JSON
 	}
 
 	configuration.Path, _ = filepath.Abs(configuration.Path)
-
 
 	if configuration.PrintConfiguration {
 		encoder := toml.NewEncoder(os.Stdout)
@@ -356,23 +346,11 @@ func configure() {
 	PrintConfiguration(configuration)
 }
 
-func getWatcher() *fsnotify.Watcher {
-	// start the watcher
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	AddFolder(watcher, configuration)
-
-	return watcher
-}
-
 func startParallelCommand() {
-//	var err error
+	//	var err error
 
 	if configuration.ParallelCommand == "" {
-		return;
+		return
 	}
 
 	for {
@@ -398,80 +376,67 @@ func startParallelCommand() {
 
 		time.Sleep(2 * time.Second)
 	}
+}
 
+func formatMessage(op Operation, format string) (raw []byte, err error) {
+	switch format {
+	case FORMAT_GEM:
+		buf := new(bytes.Buffer)
+
+		// uint32(length) + json encoded array
+		// https://github.com/guard/listen/blob/master/lib/listen/tcp/message.rb
+		payload := []byte(fmt.Sprintf(
+			`["file","%s","%s","%s",{}]`,
+			op.GemName(), filepath.Dir(op.Path), filepath.Base(op.Path),
+		))
+
+		if err := binary.Write(buf, binary.BigEndian, uint32(len(payload))); err != nil {
+			panic(err)
+		}
+
+		buf.Write(payload)
+		return buf.Bytes(), nil
+
+	case FORMAT_GO_JSON:
+		return json.Marshal(struct{ Path, Type, Dir, Filename, Operation string }{
+			Path:      op.Path,
+			Type:      "file",
+			Dir:       filepath.Dir(op.Path),
+			Filename:  filepath.Base(op.Path),
+			Operation: op.Name(),
+		})
+	}
+	return nil, fmt.Errorf("Unrecognized format %s", format)
 }
 
 func main() {
-	var err error
-
-
 	configure()
 
-	info("golisten is a development tools and not suitable for production usage")
-	info("   more information can be found at https://github.com/ekino/golisten")
-	info("                                                Thomas Rabaix @ Ekino")
-	info("")
-
-
-
-	// start the watcher
-	watcher := getWatcher()
+	info(fmt.Sprintf("Watching %s", configuration.Path))
+	watcher, err := newWatcher(configuration.Path, include, exclude)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	defer watcher.Close()
 
 	done := make(chan bool)
-
 	server := NewServer(configuration)
 
 	go StartServer(server, configuration)
-
 	running := false
 
 	go func() {
-
 		for {
 			select {
-			case event := <-watcher.Events:
-				path, _ := filepath.Abs(event.Name)
-
-				// move this into a NewOperation function
-				op := Operation{
-					Type: "file",
-					Path: path,
-					Dir: filepath.Dir(path),
-					Filename: filepath.Base(path),
-					Op: event.Op,
-				}
-
-				op.Operation = op.Name()
-
-				debug(fmt.Sprintf("Operation: %s", op.Name()))
-
-				if include.Match([]byte(path)) == false  {
-					debug(fmt.Sprintf("Skipping: does not match include path: %s", op.Path))
-
-					continue
-				}
-
-				if exclude.Match([]byte(path)) == true {
-					debug(fmt.Sprintf("Skipping: does match exclude path: %s", op.Path))
-
-					continue
-				}
-
-				debug(fmt.Sprintf("Event path: %s", op.Path))
+			case op := <-watcher.Watch():
+				info(fmt.Sprintf("Operation: %s %s", op.Name(), op.Path))
 
 				if configuration.Server != "" {
-					// format compatible with gem listen
-					// d["file","added","/Users/rande/Projects/go/gonode/src/github.com/rande/gonodeexplorer","test",{}]
-
-					var raw []byte
-					if configuration.ServerFormat == FORMAT_GEM {
-						raw = []byte(fmt.Sprintf("d[\"%s\",\"%s\",\"%s\",\"%s\",{}]", op.Type, op.GemName(), op.Dir, op.Filename ))
-					} else {
-						raw, _ = json.Marshal(op)
+					raw, err := formatMessage(op, configuration.ServerFormat)
+					if err != nil {
+						panic(err)
 					}
-
 					debug(fmt.Sprintf("Raw message: %s", raw))
 					server.SendMessage(raw)
 				}
@@ -497,10 +462,6 @@ func main() {
 						}()
 					}
 				}
-
-				info(fmt.Sprintf("Operation: %s => %s", op.Name(), op.Filename))
-			case err := <-watcher.Errors:
-				info(fmt.Sprint("error: %s", err))
 			}
 		}
 	}()
