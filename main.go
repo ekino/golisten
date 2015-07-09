@@ -73,7 +73,7 @@ func (o Operation) GemName() string {
 	case notify.Remove:
 		return "removed"
 	case notify.Rename:
-		return "removed"
+		return "renamed"
 	default:
 		return "modified"
 	}
